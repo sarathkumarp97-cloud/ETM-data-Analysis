@@ -248,7 +248,16 @@ FLEET_CAPACITY_GROUPS = {
     ),
 }
 
-SAMPLE_FILE_PATH = "sample_etm_data.csv"
+def find_sample_file():
+    """Finds the sample ETM file in the repo root regardless of .csv or .csv.bz2 extension."""
+    for candidate in ("sample_etm_data.csv.bz2", "sample_etm_data.csv", "sample_etm_data.bz2"):
+        if os.path.exists(candidate):
+            return candidate
+    # Fallback: match any file starting with sample_etm_data
+    for f in os.listdir("."):
+        if f.lower().startswith("sample_etm_data") and f.lower().endswith((".csv", ".bz2")):
+            return f
+    return None
 
 
 @st.cache_data(show_spinner=False)
@@ -372,20 +381,12 @@ with st.sidebar:
 # Collect available files as list of (display_name, file_source)
 available_items = []
 if data_source == "Use Sample ETM Data":
-    if os.path.exists(SAMPLE_FILE_PATH):
-        available_items = [(SAMPLE_FILE_PATH, SAMPLE_FILE_PATH)]
-        st.info(f"Loaded built-in sample ETM dataset: `{SAMPLE_FILE_PATH}`")
+    sample_path = find_sample_file()
+    if sample_path:
+        available_items = [(sample_path, sample_path)]
+        st.info(f"Loaded built-in sample ETM dataset: `{sample_path}`")
     else:
-        st.error(f"Sample file `{SAMPLE_FILE_PATH}` was not found in the repository root. Please upload `{SAMPLE_FILE_PATH}` to GitHub or switch to 'Upload ETM File(s)'.")
-else:
-    uploaded_files = st.file_uploader(
-        "Upload one or more ETM files (.csv or .bz2)",
-        type=["csv", "bz2"],
-        accept_multiple_files=True
-    )
-    if uploaded_files:
-        available_items = [(uf.name, uf) for uf in uploaded_files]
-        st.info(f"Uploaded {len(available_items)} ETM file(s)")
+        st.error("Sample ETM file (`sample_etm_data.csv.bz2` or `sample_etm_data.csv`) was not found in the repository root.")
 
 # Main Content: Analysis Method
 st.header("🔍 Select Analysis Method")
