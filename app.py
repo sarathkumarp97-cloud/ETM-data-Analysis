@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import io
+import gc
 import calendar
 import traceback
 import numpy as np
@@ -248,15 +249,23 @@ FLEET_CAPACITY_GROUPS = {
     ),
 }
 
+# Only load the columns required for analysis to keep memory low on Streamlit Cloud
+NEEDED_COLS = {
+    "schedule_no", "fleet_no", "trip_no", "from_stage", "to_stage",
+    "ticket_type", "KM", "Trip_Origin", "Trip_Destination", "date",
+    "duty_date", "passenger_count", "total_ticket_amount",
+    "passenger_amount", "luggage_amount"
+}
 
-@st.cache_data(show_spinner=False)
-def get_embedded_fleet_lookup():
-    """Builds the embedded MTC fleet capacity lookup DataFrame (3,390 vehicles)."""
-    rows = []
+
+@st.cache_resource(show_spinner=False)
+def get_fleet_capacity_dict():
+    """Returns a fast O(1) dictionary mapping fleet_no -> total_capacity (3,390 vehicles)."""
+    mapping = {}
     for capacity, fleet_str in FLEET_CAPACITY_GROUPS.items():
         for fleet_no in fleet_str.split():
-            rows.append((fleet_no, capacity))
-    return pd.DataFrame(rows, columns=["fleet_no", "total_capacity"])
+            mapping[fleet_no] = capacity
+    return mapping
 
 
 def find_sample_file():
@@ -284,11 +293,16 @@ def detect_compression(source):
 
 
 def read_etm_source(source):
-    """Reads an ETM file from a file path or UploadedFile, auto-detecting .bz2 content."""
+    """Reads only needed columns from an ETM file, auto-detecting .bz2 compression."""
     comp = detect_compression(source)
     if not isinstance(source, str):
         source.seek(0)
-    return pd.read_csv(source, compression=comp)
+    return pd.read_csv(
+        source,
+        compression=comp,
+        usecols=lambda c: c in NEEDED_COLS,
+        low_memory=True
+    )
 
 
 def parse_date(date_str):
@@ -322,7 +336,12 @@ def extract_file_date(file_name, source):
         comp = detect_compression(source)
         if not isinstance(source, str):
             source.seek(0)
-        sample_df = pd.read_csv(source, compression=comp, nrows=1)
+        sample_df = pd.read_csv(
+            source,
+            compression=comp,
+            usecols=lambda c: c in ('date', 'duty_date'),
+            nrows=1
+        )
         if not isinstance(source, str):
             source.seek(0)
 
@@ -378,8 +397,8 @@ if 'selected_day_type' not in st.session_state:
 st.markdown('<div class="header">ETM Data Analysis Platform PS</div>', unsafe_allow_html=True)
 st.markdown('<div class="subscript">By Sarath Kumar Ponugumati</div>', unsafe_allow_html=True)
 
-# Load embedded fleet lookup
-lookup_df = get_embedded_fleet_lookup()
+# Load embedded fleet lookup dictionary
+fleet_cap_map = get_fleet_capacity_dict()
 
 # Sidebar Configuration
 with st.sidebar:
@@ -389,7 +408,7 @@ with st.sidebar:
         ["Use Sample ETM Data", "Upload ETM File(s)"],
         index=0
     )
-    st.caption(f"✅ Fleet lookup built-in ({len(lookup_df):,} vehicles; missing fleet capacity = 65)")
+    st.caption(f"✅ Fleet lookup built-in ({len(fleet_cap_map):,} vehicles; missing fleet capacity = 65)")
 
 # Collect available files as list of (display_name, file_source)
 available_items = []
@@ -487,7 +506,7 @@ elif analysis_method == "Process files by weekday/weekend" and available_items:
 
 
 # Main processing function
-def process_file(file_name, file_source, lookup_df):
+def process_file(file_name, file_source, fleet_cap_map):
     try:
         try:
             df = read_etm_source(file_source)
@@ -583,13 +602,10 @@ def process_file(file_name, file_source, lookup_df):
             ['R01', 'R02', 'R03', 'R04', 'R05', 'R06', 'R07', 'R08']
         ].sum(axis=1)
 
-        # Merge embedded capacity data; default to 65 if fleet_no is missing or unmatched
-        df['fleet_no_clean'] = df['fleet_no'].astype(str).str.strip().str.upper()
-        lookup_clean = lookup_df.copy()
-        lookup_clean['fleet_no_clean'] = lookup_clean['fleet_no'].astype(str).str.strip().str.upper()
-        df = pd.merge(df, lookup_clean[['fleet_no_clean', 'total_capacity']], on='fleet_no_clean', how='left')
-        df["total_capacity"] = df["total_capacity"].fillna(65)
-        df.drop(columns=['fleet_no_clean'], inplace=True)
+        # Low-memory capacity lookup via dict.map (defaults missing fleet_no to 65)
+        df["total_capacity"] = (
+            df["fleet_no"].astype(str).str.strip().str.upper().map(fleet_cap_map).fillna(65).astype(np.int16)
+        )
 
         # Demand calculations
         df['stages_travelled'] = np.where(
@@ -801,6 +817,10 @@ def process_file(file_name, file_source, lookup_df):
         route_df = route_df.sort_values('route_DSRWW', ascending=False).reset_index(drop=True)
         sample_size['route_count'] = len(route_df)
 
+        # Free raw DataFrame from memory immediately
+        del df, helping_df
+        gc.collect()
+
         return service_df, route_df, sample_size
 
     except Exception as e:
@@ -833,7 +853,7 @@ if st.button("🚀 Run Analysis", key="run_analysis"):
             st.error(f"File '{file_name}' is empty (0 bytes). Please upload a valid non-empty ETM file.")
             continue
 
-        service, route, sample = process_file(file_name, file_source, lookup_df)
+        service, route, sample = process_file(file_name, file_source, fleet_cap_map)
 
         if not service.empty or not route.empty or not sample.empty:
             processed_count += 1
@@ -843,6 +863,7 @@ if st.button("🚀 Run Analysis", key="run_analysis"):
             all_route = pd.concat([all_route, route], ignore_index=True)
         if not sample.empty:
             all_sample = pd.concat([all_sample, sample], ignore_index=True)
+        gc.collect()
 
     progress_bar.empty()
     status_text.empty()
@@ -867,12 +888,12 @@ if st.session_state.analysis_complete:
         st.header("📊 Analysis Results")
 
         if has_service:
-            st.subheader("Service Data")
-            st.dataframe(st.session_state.all_service)
+            st.subheader(f"Service Data ({len(st.session_state.all_service):,} rows — showing top 500)")
+            st.dataframe(st.session_state.all_service.head(500))
 
         if has_route:
-            st.subheader("Route Data")
-            st.dataframe(st.session_state.all_route)
+            st.subheader(f"Route Data ({len(st.session_state.all_route):,} rows — showing top 500)")
+            st.dataframe(st.session_state.all_route.head(500))
 
         if has_sample:
             st.subheader("Summary Data")
