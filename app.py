@@ -248,6 +248,8 @@ FLEET_CAPACITY_GROUPS = {
     ),
 }
 
+SAMPLE_FILE_PATH = "sample_etm_data.csv"
+
 
 @st.cache_data(show_spinner=False)
 def get_embedded_fleet_lookup():
@@ -271,55 +273,16 @@ st.markdown("""
         padding: 1rem;
         font-size: 2.5rem;
         font-weight: 700;
-        margin-bottom: 1.5rem;
+        margin-bottom: 0.5rem;
         background: white;
         border-radius: 10px;
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     }
-    .section {
-        background: white;
-        border-radius: 10px;
-        padding: 1.5rem;
-        margin-bottom: 1.5rem;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    }
-    .section-title {
-        color: #3498db;
-        border-bottom: 2px solid #3498db;
-        padding-bottom: 0.5rem;
-        margin-bottom: 1.5rem;
-    }
-    .config-box {
-        background: #f8f9fa;
-        border-left: 4px solid #3498db;
-        padding: 1rem;
-        margin-bottom: 1rem;
-        border-radius: 4px;
-    }
-    .btn {
-        background: #3498db !important;
-        color: white !important;
-        border: none !important;
-        padding: 0.5rem 1rem !important;
-        border-radius: 4px !important;
-        font-weight: 600 !important;
-    }
-    .btn:hover {
-        background: #2980b9 !important;
-    }
-    .file-count {
-        font-size: 1.2rem;
+    .subscript {
+        text-align: center;
+        color: #5d6d7e;
         font-weight: 600;
-        color: #2c3e50;
-    }
-    .day-type-btn {
-        padding: 0.75rem 1.5rem !important;
-        font-size: 1.1rem !important;
-        margin: 0.5rem;
-    }
-    .selected {
-        background: #2c3e50 !important;
-        color: white !important;
+        margin-bottom: 1.5rem;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -327,8 +290,6 @@ st.markdown("""
 # Initialize session state
 if 'analysis_complete' not in st.session_state:
     st.session_state.analysis_complete = False
-if 'output_path' not in st.session_state:
-    st.session_state.output_path = ""
 if 'all_service' not in st.session_state:
     st.session_state.all_service = pd.DataFrame()
 if 'all_route' not in st.session_state:
@@ -345,41 +306,7 @@ st.markdown('<div class="subscript">By Sarath Kumar Ponugumati</div>', unsafe_al
 # Load embedded fleet lookup
 lookup_df = get_embedded_fleet_lookup()
 
-# Sidebar Configuration
-with st.sidebar:
-    st.header("⚙️ Configuration")
-    
-    # Path Configuration (Lookup file is built-in)
-    input_folder = st.text_input("Input Folder", r"please paste the path that contains Etm data in Csv or bz2 format")
-    output_folder = st.text_input("Output Folder", r"please paste path of output folder")
-    st.caption(f"✅ Fleet lookup built-in ({len(lookup_df):,} vehicles loaded; default capacity = 65)")
-    
-    # Verify paths button
-    if st.button("Verify Paths", key="verify_paths"):
-        errors = []
-        valid = True
-        
-        if not os.path.exists(input_folder):
-            errors.append(f"Input folder not found: {input_folder}")
-            valid = False
-        else:
-            csv_files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.csv', '.bz2'))]
-            if not csv_files:
-                errors.append(f"No CSV/BZ2 files found in input folder: {input_folder}")
-                valid = False
-        
-        if output_folder and output_folder != r"please paste path of output folder":
-            os.makedirs(output_folder, exist_ok=True)
-        
-        if not valid:
-            st.error("Errors found in configuration:")
-            for error in errors:
-                st.error(error)
-        else:
-            st.success("All paths are valid!")
 
-
-# Function to parse dates
 def parse_date(date_str):
     try:
         date_str = str(date_str).strip()
@@ -393,109 +320,133 @@ def parse_date(date_str):
         return None
 
 
-@st.cache_data(show_spinner=False)
-def get_file_dates_map(folder_path, filenames):
-    """Maps {filename: datetime.date} irrespective of filename format or .bz2 compression."""
-    date_map = {}
-    for file in filenames:
-        dt = None
-        # Step 1: Fast check if date is embedded in filename
-        try:
-            if "Ticket-Data" in file:
-                date_part = file.split('-')[2:5]
-                date_str = '-'.join(date_part).split('.')[0]
-                dt = datetime.strptime(date_str, '%Y-%m-%d').date()
-            elif '_' in file:
-                date_str = file.split('_')[1].split('.')[0]
-                if len(date_str) == 8 and date_str.isdigit():
-                    dt = datetime.strptime(date_str, '%d%m%Y').date()
-        except Exception:
-            dt = None
-
-        # Step 2: Fallback — inspect first row inside the file using compression='infer'
-        if dt is None:
-            try:
-                file_path = os.path.join(folder_path, file)
-                sample_df = pd.read_csv(file_path, compression='infer', nrows=1)
-                date_col = 'date' if 'date' in sample_df.columns else ('duty_date' if 'duty_date' in sample_df.columns else None)
-                if date_col and not sample_df.empty:
-                    parsed = parse_date(sample_df[date_col].iloc[0])
-                    if parsed is not None and not pd.isna(parsed):
-                        dt = parsed.date()
-            except Exception:
-                pass
-
-        if dt is not None:
-            date_map[file] = dt
-
-    return date_map
+def read_etm_source(source):
+    """Reads an ETM file from either a file path string or a Streamlit UploadedFile."""
+    if isinstance(source, str):
+        return pd.read_csv(source, compression='infer')
+    source.seek(0)
+    return pd.read_csv(source, compression='infer')
 
 
-# Main Content
+def extract_file_date(file_name, source):
+    """Extracts the date from the filename first, falling back to reading the first row inside the file."""
+    try:
+        if "Ticket-Data" in file_name:
+            date_part = file_name.split('-')[2:5]
+            date_str = '-'.join(date_part).split('.')[0]
+            return datetime.strptime(date_str, '%Y-%m-%d').date()
+        elif '_' in file_name:
+            date_str = file_name.split('_')[1].split('.')[0]
+            if len(date_str) == 8 and date_str.isdigit():
+                return datetime.strptime(date_str, '%d%m%Y').date()
+    except Exception:
+        pass
+
+    try:
+        if isinstance(source, str):
+            sample_df = pd.read_csv(source, compression='infer', nrows=1)
+        else:
+            source.seek(0)
+            sample_df = pd.read_csv(source, compression='infer', nrows=1)
+            source.seek(0)
+        date_col = 'date' if 'date' in sample_df.columns else ('duty_date' if 'duty_date' in sample_df.columns else None)
+        if date_col and not sample_df.empty:
+            parsed = parse_date(sample_df[date_col].iloc[0])
+            if parsed is not None and not pd.isna(parsed):
+                return parsed.date()
+    except Exception:
+        pass
+    return None
+
+
+# Sidebar Configuration
+with st.sidebar:
+    st.header("⚙️ Data Source & Info")
+    data_source = st.radio(
+        "Select Data Source",
+        ["Use Sample ETM Data", "Upload ETM File(s)"],
+        index=0
+    )
+    st.caption(f"✅ Fleet lookup built-in ({len(lookup_df):,} vehicles; missing fleet capacity = 65)")
+
+# Collect available files as list of (display_name, file_source)
+available_items = []
+if data_source == "Use Sample ETM Data":
+    if os.path.exists(SAMPLE_FILE_PATH):
+        available_items = [(SAMPLE_FILE_PATH, SAMPLE_FILE_PATH)]
+        st.info(f"Loaded built-in sample ETM dataset: `{SAMPLE_FILE_PATH}`")
+    else:
+        st.error(f"Sample file `{SAMPLE_FILE_PATH}` was not found in the repository root. Please upload `{SAMPLE_FILE_PATH}` to GitHub or switch to 'Upload ETM File(s)'.")
+else:
+    uploaded_files = st.file_uploader(
+        "Upload one or more ETM files (.csv or .bz2)",
+        type=["csv", "bz2"],
+        accept_multiple_files=True
+    )
+    if uploaded_files:
+        available_items = [(uf.name, uf) for uf in uploaded_files]
+        st.info(f"Uploaded {len(available_items)} ETM file(s)")
+
+# Main Content: Analysis Method
 st.header("🔍 Select Analysis Method")
-analysis_method = st.radio("", [
-    "Process all files in input folder",
-    "Process files by date range",
-    "Process files by month",
-    "Process files by weekday/weekend"
-], index=0)
+analysis_method = st.radio(
+    "Choose how to filter files:",
+    [
+        "Process all selected files",
+        "Process files by date range",
+        "Process files by month",
+        "Process files by weekday/weekend"
+    ],
+    index=0
+)
 
-# Get list of files
-all_files = []
-if os.path.exists(input_folder):
-    all_files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.csv', '.bz2'))]
-    st.info(f"Found {len(all_files)} data files in input folder")
-
-# Build date map only when needed for date-based filtering
-file_date_map = {}
-if all_files and analysis_method != "Process all files in input folder":
-    file_date_map = get_file_dates_map(input_folder, all_files)
+# Map files to dates when date-based filtering is selected
+item_date_map = {}
+if available_items and analysis_method != "Process all selected files":
+    for name, src in available_items:
+        dt = extract_file_date(name, src)
+        if dt is not None:
+            item_date_map[name] = (dt, src)
 
 # Date range selection
-date_files = []
-if analysis_method == "Process files by date range" and all_files:
+filtered_items = []
+if analysis_method == "Process files by date range" and available_items:
     st.subheader("📅 Select Date Range")
-    if file_date_map:
-        min_date = min(file_date_map.values())
-        max_date = max(file_date_map.values())
-        
+    if item_date_map:
+        dates = [v[0] for v in item_date_map.values()]
         col1, col2 = st.columns(2)
         with col1:
-            start_date = st.date_input("Start Date", min_date)
+            start_date = st.date_input("Start Date", min(dates))
         with col2:
-            end_date = st.date_input("End Date", max_date)
-        
-        date_files = [f for f, dt in file_date_map.items() if start_date <= dt <= end_date]
-        st.info(f"Found {len(date_files)} files in selected date range")
+            end_date = st.date_input("End Date", max(dates))
+        filtered_items = [(name, src) for name, (dt, src) in item_date_map.items() if start_date <= dt <= end_date]
+        st.info(f"Found {len(filtered_items)} file(s) in selected date range")
     else:
-        st.warning("No valid dates found in the input files.")
+        st.warning("No valid dates found inside the files.")
 
 # Monthly analysis selection
-month_files = []
-if analysis_method == "Process files by month" and all_files:
+elif analysis_method == "Process files by month" and available_items:
     st.subheader("🗓️ Select Month")
-    if file_date_map:
+    if item_date_map:
         month_year_options = {}
-        for file, dt in file_date_map.items():
+        for name, (dt, src) in item_date_map.items():
             month_year = f"{calendar.month_name[dt.month]} {dt.year}"
-            month_year_options.setdefault(month_year, []).append(file)
-        
+            month_year_options.setdefault(month_year, []).append((name, src))
         sorted_months = sorted(month_year_options.keys(), key=lambda x: datetime.strptime(x, '%B %Y'))
         selected_month = st.selectbox("Available Months", sorted_months)
-        month_files = month_year_options.get(selected_month, [])
-        st.info(f"Found {len(month_files)} files for {selected_month}")
+        filtered_items = month_year_options.get(selected_month, [])
+        st.info(f"Found {len(filtered_items)} file(s) for {selected_month}")
     else:
-        st.warning("No valid monthly data found in the input files.")
+        st.warning("No valid monthly data found inside the files.")
 
 # Weekday/Weekend analysis selection
-day_type_files = []
-if analysis_method == "Process files by weekday/weekend" and all_files:
+elif analysis_method == "Process files by weekday/weekend" and available_items:
     st.subheader("📅 Select Day Type")
-    weekday_files = [f for f, dt in file_date_map.items() if dt.weekday() < 5]
-    weekend_files = [f for f, dt in file_date_map.items() if dt.weekday() >= 5]
-    
-    st.info(f"Found {len(weekday_files)} weekday files and {len(weekend_files)} weekend files")
-    
+    weekday_items = [(name, src) for name, (dt, src) in item_date_map.items() if dt.weekday() < 5]
+    weekend_items = [(name, src) for name, (dt, src) in item_date_map.items() if dt.weekday() >= 5]
+
+    st.info(f"Found {len(weekday_items)} weekday file(s) and {len(weekend_items)} weekend file(s)")
+
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Weekdays (Mon-Fri)", key="weekdays", type="primary" if st.session_state.selected_day_type == "weekdays" else "secondary"):
@@ -503,29 +454,27 @@ if analysis_method == "Process files by weekday/weekend" and all_files:
     with col2:
         if st.button("Weekends (Sat-Sun)", key="weekends", type="primary" if st.session_state.selected_day_type == "weekends" else "secondary"):
             st.session_state.selected_day_type = "weekends"
-    
+
     if st.session_state.selected_day_type == "weekdays":
-        day_type_files = weekday_files
-        st.success(f"Selected Weekdays: {len(day_type_files)} files")
+        filtered_items = weekday_items
+        st.success(f"Selected Weekdays: {len(filtered_items)} file(s)")
     elif st.session_state.selected_day_type == "weekends":
-        day_type_files = weekend_files
-        st.success(f"Selected Weekends: {len(day_type_files)} files")
+        filtered_items = weekend_items
+        st.success(f"Selected Weekends: {len(filtered_items)} file(s)")
 
 
 # Main processing function
-def process_file(file_path, lookup_df):
+def process_file(file_name, file_source, lookup_df):
     try:
-        # Read the CSV/BZ2 file using compression='infer' (works regardless of file extension)
         try:
-            df = pd.read_csv(file_path, compression='infer')
+            df = read_etm_source(file_source)
         except Exception as e:
-            st.error(f"Error reading {os.path.basename(file_path)}: {str(e)}")
+            st.error(f"Error reading {file_name}: {str(e)}")
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-        # Check required columns
         required_cols = {'schedule_no', 'fleet_no', 'from_stage', 'to_stage', 'ticket_type'}
         if not required_cols.issubset(df.columns):
-            st.error(f"Missing required columns in {os.path.basename(file_path)}")
+            st.error(f"Missing required columns in {file_name}")
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
         # Process schedule numbers
@@ -537,10 +486,10 @@ def process_file(file_path, lookup_df):
                 df['trip_shift'] = df['trip_no'].astype(str) + "-" + df['shift'].astype(str)
                 df['service_trip_shift'] = df['service_no'].astype(str) + "_" + df['trip_shift'].astype(str) + "_" + df['service_type'].astype(str)
             else:
-                st.error(f"Invalid schedule_no format in {os.path.basename(file_path)}")
+                st.error(f"Invalid schedule_no format in {file_name}")
                 return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         except Exception as e:
-            st.error(f"Error processing schedule numbers in {os.path.basename(file_path)}: {str(e)}")
+            st.error(f"Error processing schedule numbers in {file_name}: {str(e)}")
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
         # Convert stage columns to numeric
@@ -554,8 +503,7 @@ def process_file(file_path, lookup_df):
         # Total Stages per each route
         df['route_description'] = df['Trip_Origin'].astype(str) + " To " + df['Trip_Destination'].astype(str)
         df['route_desc'] = df['route_no'].astype(str) + "-" + df['route_description'].astype(str)
-        
-        # Calculate total stages correctly
+
         df['max_stage'] = df[['to_stage', 'from_stage']].max(axis=1)
         df['total_stages'] = df.groupby('route_desc')['max_stage'].transform('max')
         df.drop(columns=['max_stage'], inplace=True)
@@ -583,7 +531,6 @@ def process_file(file_path, lookup_df):
             'TC08_Women': len(df[df["ticket_type"] == "Women Ticket"]),
             'all_tickets': len(df)
         }
-        
         sample_size = pd.DataFrame([ticket_counts])
 
         # Passenger Counts for Each type of Ticket
@@ -600,7 +547,7 @@ def process_file(file_path, lookup_df):
         # Revenue Calculations
         revenue_counts = df.groupby('ticket_type')['total_ticket_amount'].sum()
         luggage_revenue = df[df['ticket_type'] == 'Luggage Ticket']['luggage_amount'].sum()
-        
+
         sample_size['R01'] = revenue_counts.get('Adult Ticket', 0)
         sample_size['R02'] = revenue_counts.get('Difference Fare Ticket', 0)
         sample_size['R03'] = sample_size['PC03'] * 16
@@ -627,7 +574,6 @@ def process_file(file_path, lookup_df):
             0,
             (df['to_stage'] - df['from_stage']).abs()
         )
-        
         df['demand'] = df['passenger_count'] * df['stages_travelled']
         df['supply'] = df['total_capacity'] * (df['total_stages'] - 1)
 
@@ -635,8 +581,7 @@ def process_file(file_path, lookup_df):
         helping_df = df[['service_trip_shift']].drop_duplicates()
         helping_df[['service_no', 'trip_shift', 'service_type']] = helping_df['service_trip_shift'].str.split("_", expand=True)
         helping_df['route_no'] = helping_df['service_no'].str.split("-").str[0]
-        
-        # Aggregate metrics
+
         ticket_types_free = [
             ('TCH03', 'Disable Person Escort Ticket'),
             ('TCH04', 'Disable Person Ticket'),
@@ -644,14 +589,14 @@ def process_file(file_path, lookup_df):
             ('TCH07', 'Transgender Ticket'),
             ('TCH08', 'Women Ticket')
         ]
-        
+
         for col, ticket_type in ticket_types_free:
             helping_df[col] = helping_df['service_trip_shift'].map(
                 df[df['ticket_type'] == ticket_type].groupby('service_trip_shift')['passenger_count'].sum()
             ).fillna(0)
-        
+
         helping_df['zero_value_ticket_pass'] = helping_df[['TCH03', 'TCH04', 'TCH06', 'TCH07', 'TCH08']].sum(axis=1)
-            
+
         helping_df = helping_df.merge(
             df.groupby('service_trip_shift')['stages_travelled'].mean().rename('average_stages'),
             on='service_trip_shift'
@@ -668,7 +613,7 @@ def process_file(file_path, lookup_df):
             service_supply=('supply', 'sum'),
             zero_value_ticket_demand_service=('zero_value_ticket_demand', 'sum')
         ).reset_index().round(2)
-        
+
         # Route-level aggregates
         route_help = helping_df.groupby('route_no').agg(
             route_kms=('kms', 'sum'),
@@ -680,8 +625,7 @@ def process_file(file_path, lookup_df):
         service_df = df[["service_no", "service_type"]].drop_duplicates()
         service_df['route_no'] = service_df['service_no'].str.split("-").str[0]
         service_df = service_df[['service_no', 'service_type', 'route_no']]
-        
-        # Parse date for service_df
+
         duty_date = parse_date(df["duty_date"].iloc[0])
         if duty_date is not None and not pd.isna(duty_date):
             service_df["date"] = duty_date.strftime('%d-%m-%y')
@@ -690,7 +634,6 @@ def process_file(file_path, lookup_df):
             service_df["date"] = str(df["duty_date"].iloc[0])
             service_df["day"] = "Unknown"
 
-        # Ticket Count for service
         ticket_types = [
             ('TCS01', 'Adult Ticket'),
             ('TCS02', 'Difference Fare Ticket'),
@@ -701,16 +644,15 @@ def process_file(file_path, lookup_df):
             ('TCS07', 'Transgender Ticket'),
             ('TCS08', 'Women Ticket')
         ]
-        
+
         for col, ticket_type in ticket_types:
             service_df[col] = service_df['service_no'].map(
                 df[df['ticket_type'] == ticket_type].groupby('service_no').size()
             ).fillna(0)
-        
+
         service_df['TTPS'] = service_df[[f'TCS{i:02d}' for i in range(1, 9)]].sum(axis=1)
         service_df = service_df.merge(df.groupby('service_no').size().rename('TTPS_Check'), on='service_no', how='left').fillna(0)
 
-        # Passenger count per service
         passenger_cols = [
             ('PCS01', 'Adult Ticket'),
             ('PCS02', 'Difference Fare Ticket'),
@@ -720,23 +662,22 @@ def process_file(file_path, lookup_df):
             ('PCS07', 'Transgender Ticket'),
             ('PCS08', 'Women Ticket')
         ]
-        
+
         for col, ticket_type in passenger_cols:
             service_df[col] = service_df['service_no'].map(
                 df[df['ticket_type'] == ticket_type].groupby('service_no')['passenger_count'].sum()
             ).fillna(0)
-            
+
         service_df['PPSPD'] = service_df[
             ['PCS01', 'PCS02', 'PCS03', 'PCS04', 'PCS06', 'PCS07', 'PCS08']
         ].sum(axis=1)
-        
+
         service_df = service_df.merge(
             df.groupby('service_no')['passenger_count'].sum().rename('PPSPD_Check'),
             on='service_no',
             how='left'
         ).fillna(0)
 
-        # Revenue per service
         service_df['RS01'] = service_df['service_no'].map(
             df[df['ticket_type'] == 'Adult Ticket'].groupby('service_no')['passenger_amount'].sum()
         ).fillna(0)
@@ -753,12 +694,10 @@ def process_file(file_path, lookup_df):
         service_df['RS08'] = (service_df['PCS08'] * 16).astype(int)
 
         service_df['EPSPD'] = service_df[[f'RS{i:02d}' for i in range(1, 9)]].sum(axis=1)
-        
-        # Service metrics
+
         service_metrics = df.groupby("service_no").agg(trips_per_service=('trip_no', 'nunique')).reset_index()
         service_df = service_df.merge(service_metrics, on="service_no", how='left')
 
-        # Service Demand and supply
         service_demand = df.groupby('service_no')['demand'].sum().reset_index()
         service_df = service_df.merge(service_demand, on='service_no', how='left').fillna(0)
         service_df = pd.merge(service_df, service_help, on='service_no', how='left')
@@ -770,8 +709,7 @@ def process_file(file_path, lookup_df):
 
         # Route DataFrame
         route_df = df[['route_no']].drop_duplicates()
-        
-        # Parse date for route_df
+
         duty_date = parse_date(df["duty_date"].iloc[0])
         if duty_date is not None and not pd.isna(duty_date):
             route_df["date"] = duty_date.strftime('%d-%m-%y')
@@ -780,16 +718,14 @@ def process_file(file_path, lookup_df):
             route_df["date"] = str(df["duty_date"].iloc[0])
             route_df["day"] = "Unknown"
 
-        # Ticket Count for route
         for i, (col, ticket_type) in enumerate(ticket_types, 1):
             route_df[f'TCR{i:02d}'] = route_df['route_no'].map(
                 df[df['ticket_type'] == ticket_type].groupby('route_no').size()
             ).fillna(0)
-            
+
         route_df['TTPR'] = route_df[[f'TCR{i:02d}' for i in range(1, 9)]].sum(axis=1)
         route_df = route_df.merge(df.groupby('route_no').size().rename('TTPR_Check'), on='route_no', how='left').fillna(0)
 
-        # Passenger count per route
         route_df['PCR01'] = route_df['route_no'].map(
             df[df['ticket_type'] == 'Adult Ticket'].groupby('route_no')['passenger_count'].sum()
         ).fillna(0)
@@ -812,11 +748,9 @@ def process_file(file_path, lookup_df):
             df[df['ticket_type'] == 'Women Ticket'].groupby('route_no')['passenger_count'].sum()
         ).fillna(0)
 
-        # Total no of passengers per Route
         route_df['PPRPD'] = route_df[['PCR01', 'PCR02', 'PCR03', 'PCR04', 'PCR06', 'PCR07', 'PCR08']].sum(axis=1)
         route_df = route_df.merge(df.groupby('route_no')['passenger_count'].sum().rename('PPRPD_Check'), on='route_no')
 
-        # Revenue for Route
         route_df['RR01'] = route_df['route_no'].map(
             df[df['ticket_type'] == 'Adult Ticket'].groupby('route_no')['passenger_amount'].sum()
         ).fillna(0)
@@ -831,107 +765,84 @@ def process_file(file_path, lookup_df):
         route_df['RR06'] = (route_df['PCR06'] * 21).astype(int)
         route_df['RR07'] = (route_df['PCR07'] * 16).astype(int)
         route_df['RR08'] = (route_df['PCR08'] * 16).astype(int)
-        
+
         route_df['EPRPD'] = route_df[['RR01', 'RR02', 'RR03', 'RR04', 'RR05', 'RR06', 'RR07', 'RR08']].sum(axis=1)
 
-        # Demand and Supply Ratio Calculations
         route_demand = df.groupby('route_no')['demand'].sum().reset_index()
         route_df = route_df.merge(route_demand, on='route_no').fillna(0)
         route_df = pd.merge(route_df, route_help, on='route_no', how='left')
         route_df['route_DSRWOW'] = (route_df['demand'] / route_df['route_supply']).round(2).fillna(0)
         route_df['total_route_demand'] = (route_df["demand"] + route_df["zero_value_ticket_demand_route"]).round(2)
         route_df['route_DSRWW'] = (route_df['total_route_demand'] / route_df['route_supply']).round(2)
-        
+
         route_df = route_df.sort_values('route_DSRWW', ascending=False).reset_index(drop=True)
         sample_size['route_count'] = len(route_df)
 
         return service_df, route_df, sample_size
 
     except Exception as e:
-        st.error(f"Error processing {os.path.basename(file_path)}: {str(e)}")
+        st.error(f"Error processing {file_name}: {str(e)}")
         st.text(traceback.format_exc())
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 
 # Run Analysis Button
 if st.button("🚀 Run Analysis", key="run_analysis"):
-    if analysis_method == "Process all files in input folder":
-        files_to_process = all_files
-    elif analysis_method == "Process files by date range":
-        files_to_process = date_files
-    elif analysis_method == "Process files by month":
-        files_to_process = month_files
-    elif analysis_method == "Process files by weekday/weekend":
-        files_to_process = day_type_files
-    
-    if not files_to_process:
-        st.error("No files selected for processing!")
+    items_to_process = available_items if analysis_method == "Process all selected files" else filtered_items
+
+    if not items_to_process:
+        st.error("No files available or selected for processing!")
         st.stop()
-    
-    if not os.path.exists(input_folder):
-        st.error(f"Input folder not found: {input_folder}")
-        st.stop()
-    
-    # Initialize progress
+
     progress_bar = st.progress(0)
     status_text = st.empty()
-    
-    # Initialize results
+
     all_service = pd.DataFrame()
     all_route = pd.DataFrame()
     all_sample = pd.DataFrame()
-    
-    # Process files
-    for i, file in enumerate(files_to_process):
-        status_text.text(f"Processing {i+1}/{len(files_to_process)}: {file}")
-        progress_bar.progress(int((i + 1) / len(files_to_process) * 100))
-        
-        try:
-            service, route, sample = process_file(os.path.join(input_folder, file), lookup_df)
-            
-            if not service.empty:
-                all_service = pd.concat([all_service, service], ignore_index=True)
-            if not route.empty:
-                all_route = pd.concat([all_route, route], ignore_index=True)
-            if not sample.empty:
-                all_sample = pd.concat([all_sample, sample], ignore_index=True)
-            
-        except Exception as e:
-            st.error(f"Error processing {file}: {str(e)}")
-            st.text(traceback.format_exc())
-    
-    # Store results in session state
+
+    for i, (file_name, file_source) in enumerate(items_to_process):
+        status_text.text(f"Processing {i+1}/{len(items_to_process)}: {file_name}")
+        progress_bar.progress(int((i + 1) / len(items_to_process) * 100))
+
+        service, route, sample = process_file(file_name, file_source, lookup_df)
+
+        if not service.empty:
+            all_service = pd.concat([all_service, service], ignore_index=True)
+        if not route.empty:
+            all_route = pd.concat([all_route, route], ignore_index=True)
+        if not sample.empty:
+            all_sample = pd.concat([all_sample, sample], ignore_index=True)
+
     st.session_state.all_service = all_service
     st.session_state.all_route = all_route
     st.session_state.all_sample = all_sample
     st.session_state.analysis_complete = True
-    
-    # Clear progress bar and status
+
     progress_bar.empty()
     status_text.empty()
-    
-    st.success(f"✅ Analysis completed successfully! Processed {len(files_to_process)} files.")
+
+    st.success(f"✅ Analysis completed successfully! Processed {len(items_to_process)} file(s).")
 
 # Display results if analysis is complete
 if st.session_state.analysis_complete:
     st.header("📊 Analysis Results")
-    
+
     if not st.session_state.all_service.empty:
         st.subheader("Service Data")
         st.dataframe(st.session_state.all_service)
-    
+
     if not st.session_state.all_route.empty:
         st.subheader("Route Data")
         st.dataframe(st.session_state.all_route)
-    
+
     if not st.session_state.all_sample.empty:
         st.subheader("Summary Data")
         st.dataframe(st.session_state.all_sample)
-    
-    # Export results to Excel buffer (and save to disk if output folder is set)
+
     timestamp = datetime.now().strftime("%d-%m-%Y_%H%M%S")
     output_excel_name = f"ETM_Analysis_PS_{timestamp}.xlsx"
-    
+
     try:
         excel_buffer = io.BytesIO()
         with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
@@ -941,43 +852,31 @@ if st.session_state.analysis_complete:
                 st.session_state.all_route.to_excel(writer, sheet_name='Route_Data', index=False)
             if not st.session_state.all_sample.empty:
                 st.session_state.all_sample.to_excel(writer, sheet_name='Summary_Data', index=False)
-        excel_bytes = excel_buffer.getvalue()
-        
-        if output_folder and output_folder != r"please paste path of output folder":
-            os.makedirs(output_folder, exist_ok=True)
-            output_path = os.path.join(output_folder, output_excel_name)
-            with open(output_path, "wb") as f:
-                f.write(excel_bytes)
-            st.session_state.output_path = output_path
-            st.info(f"Results saved to: {output_path}")
-        
+
         st.download_button(
-            label="📥 Download Full Analysis Results",
-            data=excel_bytes,
+            label="📥 Download Full Analysis Results (.xlsx)",
+            data=excel_buffer.getvalue(),
             file_name=output_excel_name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-            
     except Exception as e:
         st.error(f"Error creating Excel report: {e}")
 
-# Instructions Section
+# Sidebar Instructions & Notes
 st.sidebar.header("ℹ️ Instructions")
 st.sidebar.info("""
-1. **Configure Paths**: Set input and output folders
+1. **Select Data Source**: Test immediately with built-in sample data or upload your own `.csv` / `.bz2` files
 2. **Select Analysis Method**:
-  - All Files: Process every CSV/BZ2 in input folder
-  - Date Range: Select start/end dates
-  - Monthly: Choose month from dropdown
-  - Weekday/Weekend: Analyze Mon-Fri or Sat-Sun
-3. **Verify Paths**: Check configuration is correct
-4. **Run Analysis**: Process files and generate results
-5. **Download**: Get Excel report when complete
+   - All Files: Process every selected file
+   - Date Range: Filter by start/end dates
+   - Monthly: Filter by month
+   - Weekday/Weekend: Filter Mon-Fri or Sat-Sun
+3. **Run Analysis**: Generate Service, Route, and Summary tables
+4. **Download**: Export the full multi-sheet Excel report
 """)
 
 st.sidebar.header("📝 Notes")
 st.sidebar.warning("""
 - MTC Fleet Lookup (3,390 vehicles) is built into the app; missing/unmatched fleet numbers default to a capacity of 65
-- Works with any filename (.csv or .bz2), including renamed files
-- Output folder will be created automatically if specified
+- Works with any filename (`sample_etm_data.csv`, `.csv.bz2`, etc.)
 """)
