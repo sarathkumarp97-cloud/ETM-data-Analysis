@@ -97,9 +97,9 @@ with st.sidebar:
     st.header("⚙️ Configuration")
     
     # Path Configuration
-    input_folder = st.text_input("Input Folder", r"G:\My Drive\MTC\ETM_Data")
-    output_folder = st.text_input("Output Folder", r"G:\My Drive\MTC\ETM_Data\ETM_Analysis_Results")
-    lookup_file_path = st.text_input("Lookup File Path", r"G:\My Drive\MTC _Fleet_List_08012025.xlsx")
+    input_folder = st.text_input("Input Folder", r"please select input folder")
+    output_folder = st.text_input("Output Folder", r"please select output folder")
+    lookup_file_path = st.text_input("Lookup File Path", r"please select lookup file")
     lookup_sheet_name = st.text_input("Lookup Sheet Name", "Sheet3")
     
     # Verify paths button
