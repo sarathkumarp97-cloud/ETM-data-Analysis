@@ -401,7 +401,7 @@ def process_file(file_path, lookup_df):
 
         # Merge capacity data
         df = pd.merge(df, lookup_df[['fleet_no', 'total_capacity']], on='fleet_no', how='left')
-        df["total_capacity"] = df["total_capacity"].fillna(73)
+        df["total_capacity"] = df["total_capacity"].fillna(65)
 
         # Demand calculations
         df['stages_travelled'] = np.where(df['to_stage'] == 0,
