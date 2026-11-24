@@ -97,9 +97,9 @@ with st.sidebar:
     st.header("⚙️ Configuration")
     
     # Path Configuration
-    input_folder = st.text_input("Input Folder", r"please select input folder that contains Etm data in Csv or bz2 format")
-    output_folder = st.text_input("Output Folder", r"please select output folder")
-    lookup_file_path = st.text_input("Lookup File Path", r"please select lookup file")
+    input_folder = st.text_input("Input Folder", r"please paste the path that contains Etm data in Csv or bz2 format")
+    output_folder = st.text_input("Output Folder", r"please paste path of output folder")
+    lookup_file_path = st.text_input("Lookup File Path", r"please paste path of lookup file")
     lookup_sheet_name = st.text_input("Lookup Sheet Name", "Sheet3")
     
     # Verify paths button
