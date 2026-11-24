@@ -248,17 +248,6 @@ FLEET_CAPACITY_GROUPS = {
     ),
 }
 
-def find_sample_file():
-    """Finds the sample ETM file in the repo root regardless of .csv or .csv.bz2 extension."""
-    for candidate in ("sample_etm_data.csv.bz2", "sample_etm_data.csv", "sample_etm_data.bz2"):
-        if os.path.exists(candidate):
-            return candidate
-    # Fallback: match any file starting with sample_etm_data
-    for f in os.listdir("."):
-        if f.lower().startswith("sample_etm_data") and f.lower().endswith((".csv", ".bz2")):
-            return f
-    return None
-
 
 @st.cache_data(show_spinner=False)
 def get_embedded_fleet_lookup():
@@ -268,6 +257,83 @@ def get_embedded_fleet_lookup():
         for fleet_no in fleet_str.split():
             rows.append((fleet_no, capacity))
     return pd.DataFrame(rows, columns=["fleet_no", "total_capacity"])
+
+
+def find_sample_file():
+    """Finds the sample ETM file in the repo root regardless of .csv or .csv.bz2 extension."""
+    for candidate in ("sample_etm_data.csv.bz2", "sample_etm_data.csv", "sample_etm_data.bz2"):
+        if os.path.exists(candidate):
+            return candidate
+    for f in os.listdir("."):
+        if f.lower().startswith("sample_etm_data") and f.lower().endswith((".csv", ".bz2")):
+            return f
+    return None
+
+
+def detect_compression(source):
+    """Detects bzip2 compression from actual file bytes (magic header 'BZh'), regardless of filename."""
+    if isinstance(source, str):
+        with open(source, "rb") as f:
+            header = f.read(3)
+    else:
+        pos = source.tell()
+        source.seek(0)
+        header = source.read(3)
+        source.seek(pos)
+    return "bz2" if header == b"BZh" else None
+
+
+def read_etm_source(source):
+    """Reads an ETM file from a file path or UploadedFile, auto-detecting .bz2 content."""
+    comp = detect_compression(source)
+    if not isinstance(source, str):
+        source.seek(0)
+    return pd.read_csv(source, compression=comp)
+
+
+def parse_date(date_str):
+    try:
+        date_str = str(date_str).strip()
+        for fmt in ('%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y', '%m/%d/%Y', '%d-%m-%y'):
+            try:
+                return datetime.strptime(date_str, fmt)
+            except ValueError:
+                continue
+        return pd.to_datetime(date_str, dayfirst=True)
+    except Exception:
+        return None
+
+
+def extract_file_date(file_name, source):
+    """Extracts the date from the filename first, falling back to reading the first row inside the file."""
+    try:
+        if "Ticket-Data" in file_name:
+            date_part = file_name.split('-')[2:5]
+            date_str = '-'.join(date_part).split('.')[0]
+            return datetime.strptime(date_str, '%Y-%m-%d').date()
+        elif '_' in file_name:
+            date_str = file_name.split('_')[1].split('.')[0]
+            if len(date_str) == 8 and date_str.isdigit():
+                return datetime.strptime(date_str, '%d%m%Y').date()
+    except Exception:
+        pass
+
+    try:
+        comp = detect_compression(source)
+        if not isinstance(source, str):
+            source.seek(0)
+        sample_df = pd.read_csv(source, compression=comp, nrows=1)
+        if not isinstance(source, str):
+            source.seek(0)
+
+        date_col = 'date' if 'date' in sample_df.columns else ('duty_date' if 'duty_date' in sample_df.columns else None)
+        if date_col and not sample_df.empty:
+            parsed = parse_date(sample_df[date_col].iloc[0])
+            if parsed is not None and not pd.isna(parsed):
+                return parsed.date()
+    except Exception:
+        pass
+    return None
 
 
 # Custom CSS for styling
@@ -315,59 +381,6 @@ st.markdown('<div class="subscript">By Sarath Kumar Ponugumati</div>', unsafe_al
 # Load embedded fleet lookup
 lookup_df = get_embedded_fleet_lookup()
 
-
-def parse_date(date_str):
-    try:
-        date_str = str(date_str).strip()
-        for fmt in ('%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y', '%m/%d/%Y', '%d-%m-%y'):
-            try:
-                return datetime.strptime(date_str, fmt)
-            except ValueError:
-                continue
-        return pd.to_datetime(date_str, dayfirst=True)
-    except Exception:
-        return None
-
-
-def read_etm_source(source):
-    """Reads an ETM file from either a file path string or a Streamlit UploadedFile."""
-    if isinstance(source, str):
-        return pd.read_csv(source, compression='infer')
-    source.seek(0)
-    return pd.read_csv(source, compression='infer')
-
-
-def extract_file_date(file_name, source):
-    """Extracts the date from the filename first, falling back to reading the first row inside the file."""
-    try:
-        if "Ticket-Data" in file_name:
-            date_part = file_name.split('-')[2:5]
-            date_str = '-'.join(date_part).split('.')[0]
-            return datetime.strptime(date_str, '%Y-%m-%d').date()
-        elif '_' in file_name:
-            date_str = file_name.split('_')[1].split('.')[0]
-            if len(date_str) == 8 and date_str.isdigit():
-                return datetime.strptime(date_str, '%d%m%Y').date()
-    except Exception:
-        pass
-
-    try:
-        if isinstance(source, str):
-            sample_df = pd.read_csv(source, compression='infer', nrows=1)
-        else:
-            source.seek(0)
-            sample_df = pd.read_csv(source, compression='infer', nrows=1)
-            source.seek(0)
-        date_col = 'date' if 'date' in sample_df.columns else ('duty_date' if 'duty_date' in sample_df.columns else None)
-        if date_col and not sample_df.empty:
-            parsed = parse_date(sample_df[date_col].iloc[0])
-            if parsed is not None and not pd.isna(parsed):
-                return parsed.date()
-    except Exception:
-        pass
-    return None
-
-
 # Sidebar Configuration
 with st.sidebar:
     st.header("⚙️ Data Source & Info")
@@ -387,6 +400,15 @@ if data_source == "Use Sample ETM Data":
         st.info(f"Loaded built-in sample ETM dataset: `{sample_path}`")
     else:
         st.error("Sample ETM file (`sample_etm_data.csv.bz2` or `sample_etm_data.csv`) was not found in the repository root.")
+else:
+    uploaded_files = st.file_uploader(
+        "Upload one or more ETM files (.csv or .bz2)",
+        type=["csv", "bz2"],
+        accept_multiple_files=True
+    )
+    if uploaded_files:
+        available_items = [(uf.name, uf) for uf in uploaded_files]
+        st.info(f"Uploaded {len(available_items)} ETM file(s)")
 
 # Main Content: Analysis Method
 st.header("🔍 Select Analysis Method")
@@ -801,13 +823,20 @@ if st.button("🚀 Run Analysis", key="run_analysis"):
     all_service = pd.DataFrame()
     all_route = pd.DataFrame()
     all_sample = pd.DataFrame()
+    processed_count = 0
 
     for i, (file_name, file_source) in enumerate(items_to_process):
         status_text.text(f"Processing {i+1}/{len(items_to_process)}: {file_name}")
         progress_bar.progress(int((i + 1) / len(items_to_process) * 100))
 
+        if isinstance(file_source, str) and os.path.exists(file_source) and os.path.getsize(file_source) == 0:
+            st.error(f"File '{file_name}' is empty (0 bytes). Please upload a valid non-empty ETM file.")
+            continue
+
         service, route, sample = process_file(file_name, file_source, lookup_df)
 
+        if not service.empty or not route.empty or not sample.empty:
+            processed_count += 1
         if not service.empty:
             all_service = pd.concat([all_service, service], ignore_index=True)
         if not route.empty:
@@ -815,53 +844,61 @@ if st.button("🚀 Run Analysis", key="run_analysis"):
         if not sample.empty:
             all_sample = pd.concat([all_sample, sample], ignore_index=True)
 
-    st.session_state.all_service = all_service
-    st.session_state.all_route = all_route
-    st.session_state.all_sample = all_sample
-    st.session_state.analysis_complete = True
-
     progress_bar.empty()
     status_text.empty()
 
-    st.success(f"✅ Analysis completed successfully! Processed {len(items_to_process)} file(s).")
+    if processed_count == 0:
+        st.session_state.analysis_complete = False
+        st.warning("No valid data was processed. Please check the file error message above.")
+    else:
+        st.session_state.all_service = all_service
+        st.session_state.all_route = all_route
+        st.session_state.all_sample = all_sample
+        st.session_state.analysis_complete = True
+        st.success(f"✅ Analysis completed successfully! Processed {processed_count} of {len(items_to_process)} file(s).")
 
 # Display results if analysis is complete
 if st.session_state.analysis_complete:
-    st.header("📊 Analysis Results")
+    has_service = not st.session_state.all_service.empty
+    has_route = not st.session_state.all_route.empty
+    has_sample = not st.session_state.all_sample.empty
 
-    if not st.session_state.all_service.empty:
-        st.subheader("Service Data")
-        st.dataframe(st.session_state.all_service)
+    if has_service or has_route or has_sample:
+        st.header("📊 Analysis Results")
 
-    if not st.session_state.all_route.empty:
-        st.subheader("Route Data")
-        st.dataframe(st.session_state.all_route)
+        if has_service:
+            st.subheader("Service Data")
+            st.dataframe(st.session_state.all_service)
 
-    if not st.session_state.all_sample.empty:
-        st.subheader("Summary Data")
-        st.dataframe(st.session_state.all_sample)
+        if has_route:
+            st.subheader("Route Data")
+            st.dataframe(st.session_state.all_route)
 
-    timestamp = datetime.now().strftime("%d-%m-%Y_%H%M%S")
-    output_excel_name = f"ETM_Analysis_PS_{timestamp}.xlsx"
+        if has_sample:
+            st.subheader("Summary Data")
+            st.dataframe(st.session_state.all_sample)
 
-    try:
-        excel_buffer = io.BytesIO()
-        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-            if not st.session_state.all_service.empty:
-                st.session_state.all_service.to_excel(writer, sheet_name='Service_Data', index=False)
-            if not st.session_state.all_route.empty:
-                st.session_state.all_route.to_excel(writer, sheet_name='Route_Data', index=False)
-            if not st.session_state.all_sample.empty:
-                st.session_state.all_sample.to_excel(writer, sheet_name='Summary_Data', index=False)
+        timestamp = datetime.now().strftime("%d-%m-%Y_%H%M%S")
+        output_excel_name = f"ETM_Analysis_PS_{timestamp}.xlsx"
 
-        st.download_button(
-            label="📥 Download Full Analysis Results (.xlsx)",
-            data=excel_buffer.getvalue(),
-            file_name=output_excel_name,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-    except Exception as e:
-        st.error(f"Error creating Excel report: {e}")
+        try:
+            excel_buffer = io.BytesIO()
+            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                if has_service:
+                    st.session_state.all_service.to_excel(writer, sheet_name='Service_Data', index=False)
+                if has_route:
+                    st.session_state.all_route.to_excel(writer, sheet_name='Route_Data', index=False)
+                if has_sample:
+                    st.session_state.all_sample.to_excel(writer, sheet_name='Summary_Data', index=False)
+
+            st.download_button(
+                label="📥 Download Full Analysis Results (.xlsx)",
+                data=excel_buffer.getvalue(),
+                file_name=output_excel_name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        except Exception as e:
+            st.error(f"Error creating Excel report: {e}")
 
 # Sidebar Instructions & Notes
 st.sidebar.header("ℹ️ Instructions")
@@ -879,5 +916,5 @@ st.sidebar.info("""
 st.sidebar.header("📝 Notes")
 st.sidebar.warning("""
 - MTC Fleet Lookup (3,390 vehicles) is built into the app; missing/unmatched fleet numbers default to a capacity of 65
-- Works with any filename (`sample_etm_data.csv`, `.csv.bz2`, etc.)
+- Works with any filename (`sample_etm_data.csv.bz2`, `sample_etm_data.csv`, etc.)
 """)
